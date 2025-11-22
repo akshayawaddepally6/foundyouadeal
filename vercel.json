@@ -1,0 +1,20 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/auth/:path*",
+      "destination": "/api/auth/:path*"
+    },
+    {
+      "source": "/api/deals/:path*",
+      "destination": "/api/deals/:path*"
+    },
+    {
+      "source": "/api/deals",
+      "destination": "/api/deals"
+    },
+    {
+      "source": "/api/check-price",
+      "destination": "/api/check-price"
+    }
+  ]
+}

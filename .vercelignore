@@ -1,0 +1,14 @@
+# Exclude fine-tuning folder from Vercel deployments
+fine-tuning/
+
+# Python files
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist/
+build/

@@ -1,0 +1,151 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// Users - Better Auth compatible
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String
+  emailVerified Boolean   @default(false)
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts      Account[]
+  sessions      Session[]
+  watches       Watch[]
+  notifications Notification[]
+}
+
+// Better Auth Account table
+model Account {
+  id                     String    @id @default(cuid())
+  userId                 String
+  accountId              String
+  providerId             String
+  accessToken            String?
+  refreshToken           String?
+  accessTokenExpiresAt   DateTime?
+  refreshTokenExpiresAt  DateTime?
+  scope                  String?
+  idToken                String?
+  password               String?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+}
+
+// Better Auth Session table
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// Better Auth Verification table
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([identifier, value])
+}
+
+// Products (from Amazon dataset with embeddings)
+// Note: We'll use raw SQL for pgvector since Prisma doesn't fully support it yet
+model Product {
+  id          String   @id @default(cuid())
+  title       String
+  description String   @db.Text
+  category    String
+  price       Float
+  embedding   Unsupported("vector(384)")?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([category])
+}
+
+// Scraped Deals
+model Deal {
+  id                 String    @id @default(cuid())
+  title              String
+  description        String    @db.Text
+  url                String    @unique
+  currentPrice       Float
+  predictedFairPrice Float
+  discount           Float
+  dealyticsScore     Int // 0-100
+  source             String // "dealnews", etc.
+  category           String?
+  imageUrl           String?
+
+  scrapedAt DateTime  @default(now())
+  expiresAt DateTime?
+
+  watches Watch[]
+  notifications Notification[]
+
+  @@index([dealyticsScore(sort: Desc)])
+  @@index([category])
+  @@index([scrapedAt(sort: Desc)])
+}
+
+// User price watches
+model Watch {
+  id          String   @id @default(cuid())
+  userId      String
+  dealId      String?
+  productUrl  String // User can watch any URL
+  targetPrice Float? // Optional price threshold
+  notified    Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deal Deal? @relation(fields: [dealId], references: [id])
+
+  @@index([userId])
+  @@index([notified])
+}
+
+// Notifications sent to users
+model Notification {
+  id      String  @id @default(cuid())
+  userId  String
+  dealId  String?
+  type    String // "deal_alert", "price_drop", etc.
+  message String  @db.Text
+  read    Boolean @default(false)
+  sentAt  DateTime @default(now())
+
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deal Deal? @relation(fields: [dealId], references: [id])
+
+  @@index([userId, read])
+  @@index([sentAt(sort: Desc)])
+}
