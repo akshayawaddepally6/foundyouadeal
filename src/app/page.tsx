@@ -14,7 +14,7 @@ export default function Home() {
             found you a deal
           </h1>
           <p className="text-xl text-muted-foreground mb-8 max-w-2xl mx-auto">
-            Your shopping assistant developed with AI, RAG, and agentic AI framework. Never overpay again.
+            Your shopping assistant developed with AI, RAG and agentic AI framework. Never overpay again.
           </p>
           <div className="flex gap-4 justify-center">
             <Link href="/dashboard">
@@ -36,12 +36,12 @@ export default function Home() {
               <div className="text-center">
                 <div className="text-4xl mb-4">🔍</div>
                 <h3 className="text-xl font-semibold mb-2">We Scan the Web</h3>
-                <p className="text-muted-foreground">Our AI continuously scans thousands of deals from across the internet.</p>
+                <p className="text-muted-foreground">Our AI agents continuously scan thousands of deals from across the internet.</p>
               </div>
               <div className="text-center">
                 <div className="text-4xl mb-4">🤖</div>
                 <h3 className="text-xl font-semibold mb-2">AI Predicts Fair Prices</h3>
-                <p className="text-muted-foreground">Machine learning models predict what items should actually cost.</p>
+                <p className="text-muted-foreground">Our LLM's (combined with a RAG benefit) predict what items should actually cost.</p>
               </div>
               <div className="text-center">
                 <div className="text-4xl mb-4">💰</div>

@@ -10,7 +10,7 @@ async function DealsFeed({ category }: { category?: string }) {
   const deals = await prisma.deal.findMany({
     where: category ? { category } : {},
     orderBy: [{ dealyticsScore: 'desc' }, { scrapedAt: 'desc' }],
-    take: 20,
+    take: 21,
   })
 
   if (deals.length === 0) {
