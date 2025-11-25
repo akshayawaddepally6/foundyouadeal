@@ -11,7 +11,7 @@ export default function Home() {
         {/* Hero Section */}
         <section className="container mx-auto px-4 py-20 text-center">
           <h1 className="text-5xl font-bold mb-6">
-            found you a deal
+            Found you a Deal!!
           </h1>
           <p className="text-xl text-muted-foreground mb-8 max-w-2xl mx-auto">
             Your shopping assistant developed with AI, RAG and agentic AI framework. Never overpay again.

@@ -43,13 +43,22 @@ export class PlanningAgent {
             continue
           }
 
-          // Calculate discount and score
-          const discount = prediction.finalPrice - deal.price
-          const discountPercent = (discount / prediction.finalPrice) * 100
+          // Calculate discount + smart deal score
+          const {
+            discount,
+            discountPercent,
+            dealyticsScore,
+          } = this.calculateDealScore({
+            currentPrice: deal.price,
+            fairPrice: prediction.finalPrice,
+          })
 
-          // Deal Score: 0-100 based on discount percentage
-          // Score = min(100, max(0, discountPercent))
-          const dealyticsScore = Math.min(100, Math.max(0, Math.round(discountPercent)))
+          // If score is 0, it's not really a deal – you can choose to skip or still save
+          if (dealyticsScore === 0) {
+            console.warn(`   ⚠️  Skipped (not a real deal, score = 0)`)
+            skippedCount++
+            continue
+          }
 
           // Extract category from description (simple approach)
           const category = this.extractCategory(deal.product_description)
@@ -114,6 +123,67 @@ export class PlanningAgent {
     }
   }
 
+  // ⭐ New smarter scoring logic
+  private calculateDealScore({
+    currentPrice,
+    fairPrice,
+  }: {
+    currentPrice: number
+    fairPrice: number
+  }): {
+    discount: number
+    discountPercent: number
+    dealyticsScore: number
+  } {
+    // Basic sanity checks
+    if (
+      !Number.isFinite(currentPrice) ||
+      !Number.isFinite(fairPrice) ||
+      currentPrice <= 0 ||
+      fairPrice <= 0
+    ) {
+      return { discount: 0, discountPercent: 0, dealyticsScore: 0 }
+    }
+
+    const discount = fairPrice - currentPrice
+    const discountPercent = (discount / fairPrice) * 100
+
+    // Not actually cheaper than "fair price" → not a deal
+    if (discount <= 0) {
+      return { discount, discountPercent, dealyticsScore: 0 }
+    }
+
+    // 1) Base score mainly from discount percent (0–90 range)
+    let baseScore = Math.max(0, Math.min(90, discountPercent))
+
+    // 2) Bonus / penalty from absolute savings ($)
+    let bonus = 0
+    if (discount < 5) {
+      bonus = -10 // tiny savings
+    } else if (discount >= 5 && discount < 20) {
+      bonus = 0 // neutral
+    } else if (discount >= 20 && discount < 100) {
+      bonus = 5 // nice savings
+    } else if (discount >= 100) {
+      bonus = 10 // big savings
+    }
+
+    // 3) Adjust for overall price range
+    let multiplier = 1
+    if (fairPrice < 20) {
+      multiplier = 0.7 // cheap item
+    } else if (fairPrice > 500) {
+      multiplier = 1.1 // big-ticket item
+    }
+
+    let score = (baseScore + bonus) * multiplier
+
+    // Final clamp 0–100
+    const dealyticsScore = Math.max(0, Math.min(100, Math.round(score)))
+
+    return { discount, discountPercent, dealyticsScore }
+  }
+
   private extractCategory(description: string): string {
     const desc = description.toLowerCase()
 
@@ -139,3 +209,4 @@ export class PlanningAgent {
     return 'General'
   }
 }
+

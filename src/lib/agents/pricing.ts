@@ -6,52 +6,108 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 })
 
+const ALLOWED_CATEGORIES = [
+  'Automotive',
+  'Electronics',
+  'Office_Products',
+  'Tools_and_Home_Improvement',
+  'Cell_Phones_and_Accessories',
+  'Toys_and_Games',
+  'Appliances',
+  'Musical_Instruments',
+] as const
+
+type ProductCategory = (typeof ALLOWED_CATEGORIES)[number]
+
+type GPTPriceResult = {
+  price: number
+  neighborAveragePrice: number | null
+  neighborCount: number
+  topDistance: number | null
+}
+
+function parsePrice(text: string | null | undefined): number {
+  if (!text) return 0
+  const num = parseFloat(text.replace(/[^0-9.]/g, ''))
+  return Number.isFinite(num) ? num : 0
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  if (sorted.length % 2 === 0) {
+    return (sorted[mid - 1] + sorted[mid]) / 2
+  }
+  return sorted[mid]
+}
+
 /**
- * Pricing Agent - AI-powered product price prediction
- *
- * Architecture:
- * - Uses a 2-model ensemble for accurate price predictions
- * - Llama (70%): Fine-tuned model hosted on Modal, optimized for pricing
- * - GPT-4o-mini (30%): OpenAI model with RAG (Retrieval-Augmented Generation)
- *
- * RAG Implementation:
- * - Vector database: PostgreSQL with pgvector extension
- * - 400K+ products with 384-dimensional embeddings
- * - Cosine similarity search for finding comparable products
- *
- * Fallback Strategy:
- * - If Llama fails → GPT-only prediction
- * - If GPT fails → Llama-only prediction
- * - If both fail → Return 0 (error state)
+ * Pricing Agent - category-aware RAG + smarter ensemble
  */
 export class PricingAgent {
   /**
+   * Use GPT to map a free-text description to one of your 8 categories.
+   */
+  private async detectCategory(
+    description: string,
+  ): Promise<ProductCategory | null> {
+    try {
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: [
+              'You are a classifier that assigns a product description to exactly one category.',
+              'Valid categories are:',
+              ALLOWED_CATEGORIES.join(', '),
+              'Respond with ONLY the category string exactly as given, or "Unknown" if unsure.',
+            ].join(' '),
+          },
+          {
+            role: 'user',
+            content: `Product description:\n${description}\n\nWhat category is this?`,
+          },
+        ],
+        max_tokens: 20,
+        temperature: 0,
+      })
+
+      const raw = (completion.choices[0].message.content || '').trim()
+
+      // Try to match raw output to one of the allowed categories
+      const matched = ALLOWED_CATEGORIES.find((cat) => raw.includes(cat))
+
+      if (!matched) {
+        console.warn(`   ⚠️  Category detection: got "${raw}", treating as Unknown`)
+        return null
+      }
+
+      console.log(`   🏷️  Detected category: ${matched}`)
+      return matched
+    } catch (err) {
+      console.warn('   ⚠️  Category detection failed:', err)
+      return null
+    }
+  }
+
+  /**
    * Get price prediction from Llama model hosted on Modal
-   *
-   * Flow:
-   * - Development: Calls local Python bridge server (localhost:3001)
-   * - Production: Calls Vercel serverless Python function
-   * - The Python bridge uses Modal SDK to invoke the deployed Llama model
-   *
-   * @param description - Product description text
-   * @returns Predicted price in USD (0 if error)
    */
   async getLlamaPrice(description: string): Promise<number> {
     const startTime = Date.now()
     console.log('🦙 Llama pricing: Starting...')
 
     try {
-      // In development, use local Python dev server on port 3001
-      // In production, use main production URL to avoid preview deployment protection
       const isDevelopment = process.env.NODE_ENV === 'development'
       const endpoint = isDevelopment
-        ? 'http://localhost:3001'  // Local Python server
-        : `${process.env.NEXT_PUBLIC_BETTER_AUTH_URL}/api/modal-llama`  // Production URL
+        ? 'http://localhost:3001'
+        : `${process.env.NEXT_PUBLIC_BETTER_AUTH_URL}/api/modal-llama`
 
       console.log(`   🔗 Endpoint: ${endpoint}`)
       console.log(`   🌍 Environment: ${isDevelopment ? 'development' : 'production'}`)
 
-      // Call Python bridge to Modal via Python SDK
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
@@ -64,7 +120,6 @@ export class PricingAgent {
       console.log(`   📋 Response headers:`, Object.fromEntries(response.headers.entries()))
 
       if (!response.ok) {
-        // Try to read response body for more details
         const errorText = await response.text()
         console.error(`   ❌ Response body: ${errorText}`)
         throw new Error(`Python bridge error: ${response.statusText} - ${errorText}`)
@@ -87,134 +142,16 @@ export class PricingAgent {
   }
 
   /**
-   * Get price prediction from GPT-4o-mini with RAG (Retrieval-Augmented Generation)
-   *
-   * RAG Pipeline (4 steps):
-   * 1. Generate embedding: Convert product description to 384D vector using OpenAI
-   * 2. Vector search: Find 5 most similar products from 400K+ database using cosine similarity
-   * 3. Build context: Create prompt with similar products and their prices
-   * 4. GPT prediction: Use context-aware GPT to predict price
-   *
-   * Why RAG?
-   * - Improves accuracy by grounding predictions in real product data
-   * - Helps GPT understand market pricing for similar products
-   * - Reduces hallucination by providing concrete examples
-   *
-   * Technical Details:
-   * - Embedding model: text-embedding-3-small (384 dimensions)
-   * - Vector DB: PostgreSQL with pgvector extension
-   * - Similarity metric: Cosine distance (<-> operator)
-   * - Context size: ~3000 chars (5 products)
-   *
-   * @param description - Product description text
-   * @returns Predicted price in USD (0 if error)
+   * Simple GPT-only pricing (no RAG)
    */
-  async getGPTPrice(description: string): Promise<number> {
-    const ragStartTime = Date.now()
-    console.log('🤖 GPT+RAG pricing: Starting...')
-
-    try {
-      // 1. Generate embedding for description
-      console.log('   Step 1/4: Generating embedding...')
-      const embStartTime = Date.now()
-      const embeddingResponse = await openai.embeddings.create({
-        model: 'text-embedding-3-small',
-        input: description,
-        dimensions: 384, // Match database vector(384) size
-      })
-      const embedding = embeddingResponse.data[0].embedding
-      const embTime = ((Date.now() - embStartTime) / 1000).toFixed(2)
-
-      // Verify embedding size
-      console.log(`   ✅ Embedding: ${embedding.length}D (${embTime}s)`)
-      if (embedding.length !== 384) {
-        console.warn(`   ⚠️  Size mismatch! Expected 384, got ${embedding.length}`)
-      }
-
-      // 2. Find similar products using pgvector (vector similarity search)
-      console.log('   Step 2/4: Vector similarity search...')
-      const vectorStartTime = Date.now()
-
-      // Convert embedding array to pgvector format: '[0.123,-0.456,...]'
-      const embeddingString = `[${embedding.join(',')}]`
-
-      // Use raw SQL for pgvector similarity search (cosine distance: <->)
-      // This finds the 5 most similar products based on embedding similarity
-      const similarProducts = await prisma.$queryRaw<
-        Array<{ title: string; description: string; price: number }>
-      >`
-        SELECT title, description, price
-        FROM "Product"
-        WHERE embedding IS NOT NULL
-        ORDER BY embedding <-> ${embeddingString}::vector
-        LIMIT 5
-      `
-
-      const vectorTime = ((Date.now() - vectorStartTime) / 1000).toFixed(2)
-
-      if (similarProducts.length === 0) {
-        console.warn(`   ⚠️  No products found (${vectorTime}s)`)
-        // Fallback to simple GPT prediction without context
-        return await this.getSimpleGPTPrice(description)
-      }
-
-      console.log(`   ✅ Found ${similarProducts.length} products (${vectorTime}s)`)
-      similarProducts.forEach((p, i) => {
-        console.log(`      ${i + 1}. ${p.title.slice(0, 50)} - $${p.price}`)
-      })
-
-      // 3. Build context from similar products
-      console.log('   Step 3/4: Building RAG context...')
-      const context = similarProducts
-        .map((p) => `${p.description}\nPrice: $${p.price}`)
-        .join('\n\n')
-
-      console.log(`   ✅ Context: ${context.length} chars`)
-
-      // 4. Call GPT-4o with context
-      console.log('   Step 4/4: Calling GPT-4o-mini...')
-      const gptStartTime = Date.now()
-      const completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: 'You estimate product prices. Respond with ONLY a number (no currency symbol or text).',
-          },
-          {
-            role: 'user',
-            content: `Here are some reference products with their prices:\n\n${context}\n\nNow estimate the price for this product:\n${description}`,
-          },
-          { role: 'assistant', content: 'Price is $' },
-        ],
-        max_tokens: 10,
-        temperature: 0.3,
-      })
-
-      const priceText = completion.choices[0].message.content || '0'
-      const price = parseFloat(priceText.replace(/[^0-9.]/g, ''))
-
-      const gptTime = ((Date.now() - gptStartTime) / 1000).toFixed(2)
-      const totalTime = ((Date.now() - ragStartTime) / 1000).toFixed(2)
-
-      console.log(`   ✅ GPT responded: $${price} (${gptTime}s)`)
-      console.log(`   📊 Tokens: ${completion.usage?.total_tokens || 'N/A'} (prompt: ${completion.usage?.prompt_tokens || 'N/A'}, completion: ${completion.usage?.completion_tokens || 'N/A'})`)
-      console.log(`🤖 GPT+RAG complete: $${price} (total ${totalTime}s)`)
-      return price || 0
-    } catch (error) {
-      const totalTime = ((Date.now() - ragStartTime) / 1000).toFixed(2)
-      console.error(`🤖 GPT+RAG failed (${totalTime}s):`, error)
-      return 0
-    }
-  }
-
   private async getSimpleGPTPrice(description: string): Promise<number> {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
         {
           role: 'system',
-          content: 'You estimate product prices based on descriptions. Respond with ONLY a number.',
+          content:
+            'You estimate product prices based on descriptions. Respond with ONLY a number (no currency symbol or extra text).',
         },
         {
           role: 'user',
@@ -226,48 +163,301 @@ export class PricingAgent {
       temperature: 0.3,
     })
 
-    const priceText = completion.choices[0].message.content || '0'
-    return parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0
+    return parsePrice(completion.choices[0].message.content)
   }
 
-  // Ensemble: combine Llama + GPT predictions
+  /**
+   * GPT-4o-mini with category-aware RAG over pgvector.
+   *
+   * NEW RULE:
+   * - We fetch up to 5 closest products.
+   * - We ONLY keep neighbors with distance <= 0.5 as "good".
+   * - GPT RAG context + neighbor avg use ONLY those good neighbors.
+   * - If NO neighbor has distance <= 0.5 → skip RAG and use simple GPT (no context).
+   */
+  async getGPTPrice(description: string): Promise<GPTPriceResult> {
+    const ragStartTime = Date.now()
+    console.log('🤖 GPT+RAG pricing: Starting...')
+
+    try {
+      // 0. Detect category first (optional but very helpful)
+      console.log('   Step 0/4: Detecting category...')
+      const detectedCategory = await this.detectCategory(description)
+
+      // 1. Generate embedding
+      console.log('   Step 1/4: Generating embedding...')
+      const embStartTime = Date.now()
+      const embeddingResponse = await openai.embeddings.create({
+        model: 'text-embedding-3-small',
+        input: description,
+        dimensions: 384,
+      })
+      const embedding = embeddingResponse.data[0].embedding
+      const embTime = ((Date.now() - embStartTime) / 1000).toFixed(2)
+      console.log(`   ✅ Embedding: ${embedding.length}D (${embTime}s)`)
+
+      if (embedding.length !== 384) {
+        console.warn(`   ⚠️  Size mismatch! Expected 384, got ${embedding.length}`)
+      }
+
+      // 2. Vector similarity search, filtered by category if available
+      console.log('   Step 2/4: Vector similarity search...')
+      const vectorStartTime = Date.now()
+      const embeddingString = `[${embedding.join(',')}]`
+
+      let similarProducts: Array<{
+        title: string
+        description: string
+        price: number
+        distance: number
+      }> = []
+
+      if (detectedCategory) {
+        console.log(
+          `   🔍 Using category filter: category = "${detectedCategory}"`,
+        )
+        similarProducts = await prisma.$queryRaw<
+          Array<{
+            title: string
+            description: string
+            price: number
+            distance: number
+          }>
+        >`
+          SELECT
+            title,
+            description,
+            price,
+            (embedding <-> ${embeddingString}::vector) AS distance
+          FROM "Product"
+          WHERE embedding IS NOT NULL
+            AND category = ${detectedCategory}
+          ORDER BY embedding <-> ${embeddingString}::vector
+          LIMIT 5
+        `
+      } else {
+        console.log('   🔍 No category detected, searching across all products')
+        similarProducts = await prisma.$queryRaw<
+          Array<{
+            title: string
+            description: string
+            price: number
+            distance: number
+          }>
+        >`
+          SELECT
+            title,
+            description,
+            price,
+            (embedding <-> ${embeddingString}::vector) AS distance
+          FROM "Product"
+          WHERE embedding IS NOT NULL
+          ORDER BY embedding <-> ${embeddingString}::vector
+          LIMIT 5
+        `
+      }
+
+      const vectorTime = ((Date.now() - vectorStartTime) / 1000).toFixed(2)
+
+      if (similarProducts.length === 0) {
+        console.warn(`   ⚠️  No products found (${vectorTime}s), using simple GPT`)
+        const fallbackPrice = await this.getSimpleGPTPrice(description)
+        return {
+          price: fallbackPrice,
+          neighborAveragePrice: null,
+          neighborCount: 0,
+          topDistance: null,
+        }
+      }
+
+      console.log(`   ✅ Found ${similarProducts.length} raw neighbors (${vectorTime}s)`)
+      similarProducts.forEach((p, i) => {
+        console.log(
+          `      RAW ${i + 1}. ${p.title.slice(0, 60)} - $${p.price} (d=${p.distance.toFixed(
+            4,
+          )})`,
+        )
+      })
+
+      // 3. Keep only neighbors with distance <= 0.5
+      const GOOD_NEIGHBOR_MAX_DISTANCE = 0.5
+
+      const goodNeighbors = similarProducts.filter(
+        (p) =>
+          typeof p.distance === 'number' &&
+          Number.isFinite(p.distance) &&
+          p.distance <= GOOD_NEIGHBOR_MAX_DISTANCE,
+      )
+
+      const topDistance =
+        typeof similarProducts[0].distance === 'number'
+          ? similarProducts[0].distance
+          : null
+
+      console.log(
+        `   🎯 Good neighbors (distance <= ${GOOD_NEIGHBOR_MAX_DISTANCE}): ${goodNeighbors.length}/${similarProducts.length}`,
+      )
+
+      // If no good neighbors, skip RAG completely and use simple GPT
+      if (goodNeighbors.length === 0) {
+        console.warn(
+          `   ⚠️  No neighbors with distance <= ${GOOD_NEIGHBOR_MAX_DISTANCE}. Skipping RAG and using SIMPLE GPT.`,
+        )
+        const fallbackPrice = await this.getSimpleGPTPrice(description)
+        const totalTime = ((Date.now() - ragStartTime) / 1000).toFixed(2)
+        console.log(
+          `🤖 GPT (simple, no RAG) complete: $${fallbackPrice} (total ${totalTime}s)`,
+        )
+        return {
+          price: fallbackPrice,
+          neighborAveragePrice: null,
+          neighborCount: 0,
+          topDistance,
+        }
+      }
+
+      console.log('   ✅ Good neighbors (used for RAG):')
+      goodNeighbors.forEach((p, i) => {
+        console.log(
+          `      GOOD ${i + 1}. ${p.title.slice(0, 60)} - $${p.price} (d=${p.distance.toFixed(
+            4,
+          )})`,
+        )
+      })
+
+      // Neighbor stats based ONLY on good neighbors
+      const prices = goodNeighbors
+        .map((p) => Number(p.price || 0))
+        .filter((n) => n > 0)
+
+      const neighborAveragePrice =
+        prices.length > 0
+          ? prices.reduce((sum, v) => sum + v, 0) / prices.length
+          : 0
+
+      console.log(
+        `   💡 Neighbor avg price (good-only): $${neighborAveragePrice.toFixed(2)}`,
+      )
+
+      // 4. Build context from good neighbors and call GPT
+      console.log('   Step 3/4: Building RAG context from GOOD neighbors only...')
+      const context = goodNeighbors
+        .map((p) => `${p.description}\nPrice: $${p.price}`)
+        .join('\n\n')
+      console.log(`   ✅ Context length: ${context.length} chars`)
+
+      console.log('   Step 4/4: Calling GPT-4o-mini with RAG context...')
+      const gptStartTime = Date.now()
+
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You estimate realistic product prices in USD. Respond with ONLY a number, no currency symbol or extra text.',
+          },
+          {
+            role: 'user',
+            content: [
+              `Here are some similar reference products with their prices (average: $${neighborAveragePrice.toFixed(
+                2,
+              )}):`,
+              '',
+              context,
+              '',
+              'Now estimate the price for this product:',
+              description,
+            ].join('\n'),
+          },
+          { role: 'assistant', content: 'Price is $' },
+        ],
+        max_tokens: 10,
+        temperature: 0.3,
+      })
+
+      const price = parsePrice(completion.choices[0].message.content)
+
+      const gptTime = ((Date.now() - gptStartTime) / 1000).toFixed(2)
+      const totalTime = ((Date.now() - ragStartTime) / 1000).toFixed(2)
+
+      console.log(`   ✅ GPT responded: $${price} (${gptTime}s)`)
+      console.log(
+        `🤖 GPT+RAG complete: $${price} (total ${totalTime}s, using ${goodNeighbors.length} good neighbors)`,
+      )
+
+      return {
+        price: price || 0,
+        neighborAveragePrice:
+          prices.length && Number.isFinite(neighborAveragePrice)
+            ? neighborAveragePrice
+            : null,
+        neighborCount: goodNeighbors.length,
+        topDistance,
+      }
+    } catch (error) {
+      const totalTime = ((Date.now() - ragStartTime) / 1000).toFixed(2)
+      console.error(`🤖 GPT+RAG failed (${totalTime}s):`, error)
+      const fallbackPrice = await this.getSimpleGPTPrice(description)
+      return {
+        price: fallbackPrice,
+        neighborAveragePrice: null,
+        neighborCount: 0,
+        topDistance: null,
+      }
+    }
+  }
+
+  /**
+   * Main entry: combine Llama + GPT + (good) neighbor average
+   */
   async predictPrice(description: string): Promise<PricePrediction> {
     const totalStartTime = Date.now()
     console.log(`💰 PRICING: "${description.slice(0, 60)}..."`)
     console.log(`─────────────────────────────────────────────────────────`)
 
-    const [llamaPrice, gptPrice] = await Promise.all([
+    const [llamaPrice, gptResult] = await Promise.all([
       this.getLlamaPrice(description),
       this.getGPTPrice(description),
     ])
 
+    const gptPrice = gptResult.price
+    const neighborAvg = gptResult.neighborAveragePrice
+
     console.log(`─────────────────────────────────────────────────────────`)
     console.log(`📊 ENSEMBLE CALCULATION:`)
+    console.log(`   Llama:   $${llamaPrice.toFixed(2)}`)
+    console.log(`   GPT:     $${gptPrice.toFixed(2)}`)
+    if (neighborAvg && neighborAvg > 0) {
+      console.log(`   Neighbor avg (good-only): $${neighborAvg.toFixed(2)}`)
+    } else {
+      console.log('   Neighbor avg: (not used)')
+    }
 
-    // Ensemble logic: weighted average
-    // If Modal is not configured, use only GPT
-    let finalPrice: number
-    let method: string
+    const signals: number[] = []
+    if (llamaPrice > 0) signals.push(llamaPrice)
+    if (gptPrice > 0) signals.push(gptPrice)
+    if (neighborAvg && neighborAvg > 0) signals.push(neighborAvg)
 
-    if (llamaPrice > 0 && gptPrice > 0) {
-      // Both models available: weighted average (70% Llama, 30% GPT)
-      const llamaContribution = llamaPrice * 0.7
-      const gptContribution = gptPrice * 0.3
-      finalPrice = llamaContribution + gptContribution
-      method = '70% Llama + 30% GPT'
+    let finalPrice = 0
+    let method = 'Unknown'
 
-      console.log(`   Llama: $${llamaPrice.toFixed(2)} × 0.70 = $${llamaContribution.toFixed(2)}`)
-      console.log(`   GPT:   $${gptPrice.toFixed(2)} × 0.30 = $${gptContribution.toFixed(2)}`)
+    if (signals.length >= 2) {
+      finalPrice = median(signals)
+      method =
+        signals.length === 3
+          ? 'Median of Llama + GPT + neighbor avg'
+          : 'Median of available signals'
       console.log(`   ─────────────────────────`)
-      console.log(`   Final: $${finalPrice.toFixed(2)} (${method})`)
+      console.log(`   Final (ensemble): $${finalPrice.toFixed(2)} (${method})`)
     } else if (llamaPrice > 0) {
       finalPrice = llamaPrice
-      method = 'Llama only (GPT failed)'
-      console.log(`   ⚠️  GPT failed, using Llama: $${finalPrice.toFixed(2)}`)
+      method = 'Llama only'
+      console.log(`   ⚠️  Using Llama only: $${finalPrice.toFixed(2)}`)
     } else if (gptPrice > 0) {
       finalPrice = gptPrice
-      method = 'GPT only (Llama failed)'
-      console.log(`   ⚠️  Llama failed, using GPT: $${finalPrice.toFixed(2)}`)
+      method = 'GPT only'
+      console.log(`   ⚠️  Using GPT only: $${finalPrice.toFixed(2)}`)
     } else {
       finalPrice = 0
       method = 'Both failed'
@@ -275,13 +465,13 @@ export class PricingAgent {
     }
 
     const totalTime = ((Date.now() - totalStartTime) / 1000).toFixed(2)
-    console.log(`💰 PRICING COMPLETE: $${finalPrice.toFixed(2)} (${totalTime}s)`)
+    console.log(`💰 PRICING COMPLETE: $${finalPrice.toFixed(2)} (${totalTime}s) [${method}]`)
     console.log(`═════════════════════════════════════════════════════════\n`)
 
     return {
       llamaPrice,
       gptPrice,
-      finalPrice: Math.round(finalPrice * 100) / 100, // Round to 2 decimals
+      finalPrice: Math.round(finalPrice * 100) / 100,
     }
   }
 }
