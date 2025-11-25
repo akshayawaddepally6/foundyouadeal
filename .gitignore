@@ -49,3 +49,6 @@ next-env.d.ts
 /fine-tuning/*.pyc
 /fine-tuning/.pytest_cache
 /fine-tuning/evaluation_results.png
+
+
+.venv/
