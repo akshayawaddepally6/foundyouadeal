@@ -96,6 +96,7 @@ model Deal {
   title              String
   description        String    @db.Text
   url                String    @unique
+  merchantUrl        String?              //NEW: direct store link
   currentPrice       Float
   predictedFairPrice Float
   discount           Float

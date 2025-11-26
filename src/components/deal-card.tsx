@@ -23,6 +23,9 @@ export function DealCard({ deal }: DealCardProps) {
     return 'Meh'
   }
 
+  // 👇 IMPORTANT FIX: Choose merchantUrl if available, else source DealNews URL
+  const finalUrl = deal.merchantUrl || deal.url
+
   return (
     <Card className="h-full flex flex-col hover:shadow-lg transition-shadow">
       <CardHeader>
@@ -60,7 +63,7 @@ export function DealCard({ deal }: DealCardProps) {
 
       <CardFooter className="flex gap-2">
         <Button asChild className="flex-1">
-          <Link href={deal.url} target="_blank" rel="noopener noreferrer">
+          <Link href={finalUrl} target="_blank" rel="noopener noreferrer">
             View Deal
           </Link>
         </Button>

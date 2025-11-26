@@ -6,12 +6,14 @@ export interface ScrapedDeal {
   details: string
   features: string
   url: string
+  merchantUrl: string | null // direct store link
 }
 
 export interface SelectedDeal {
   product_description: string
   price: number
   url: string
+  merchantUrl?: string | null // direct store link, goes into Prisma.merchantUrl
 }
 
 export interface PricePrediction {

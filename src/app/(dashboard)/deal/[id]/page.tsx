@@ -1,14 +1,28 @@
+// src/app/(dashboard)/deal/[id]/page.tsx
 import { notFound } from 'next/navigation'
 import { prisma } from '@/lib/db/prisma'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import Link from 'next/link'
 
-export default async function DealPage({ params }: { params: Promise<{ id: string }> }) {
+type DealPageProps = {
+  // ✅ In Next.js 16, params is a Promise
+  params: Promise<{ id: string }>
+}
+
+export default async function DealPage({ params }: DealPageProps) {
+  // ✅ Unwrap the Promise
   const { id } = await params
 
+  // ✅ Load deal by its cuid id
   const deal = await prisma.deal.findUnique({
     where: { id },
   })
@@ -16,6 +30,9 @@ export default async function DealPage({ params }: { params: Promise<{ id: strin
   if (!deal) {
     notFound()
   }
+
+  // ✅ Prefer merchantUrl, fall back to DealNews url
+  const finalUrl = deal.merchantUrl || deal.url
 
   const getScoreColor = (score: number): string => {
     if (score >= 70) return 'bg-green-500'
@@ -33,34 +50,49 @@ export default async function DealPage({ params }: { params: Promise<{ id: strin
 
   return (
     <div className="container mx-auto px-4 py-8">
-      <Link href="/dashboard" className="text-sm text-muted-foreground hover:text-foreground mb-4 inline-block">
+      <Link
+        href="/dashboard"
+        className="mb-4 inline-block text-sm text-muted-foreground hover:text-foreground"
+      >
         ← Back to Dashboard
       </Link>
 
-      <div className="grid lg:grid-cols-3 gap-6">
+      <div className="grid gap-6 lg:grid-cols-3">
         {/* Main Content */}
         <div className="lg:col-span-2">
           <Card>
             <CardHeader>
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <CardTitle className="text-2xl mb-2">{deal.title}</CardTitle>
-                  {deal.category && <CardDescription className="text-base">{deal.category}</CardDescription>}
+                  <CardTitle className="mb-2 text-2xl">{deal.title}</CardTitle>
+                  {deal.category && (
+                    <CardDescription className="text-base">
+                      {deal.category}
+                    </CardDescription>
+                  )}
                 </div>
-                <Badge className={`${getScoreColor(deal.dealyticsScore)} text-lg px-4 py-2`}>{deal.dealyticsScore}</Badge>
+                <Badge
+                  className={`${getScoreColor(
+                    deal.dealyticsScore,
+                  )} px-4 py-2 text-lg`}
+                >
+                  {deal.dealyticsScore}
+                </Badge>
               </div>
             </CardHeader>
             <CardContent>
               <div className="space-y-6">
                 <div>
-                  <h3 className="font-semibold mb-2">Description</h3>
-                  <p className="text-muted-foreground leading-relaxed">{deal.description}</p>
+                  <h3 className="mb-2 font-semibold">Description</h3>
+                  <p className="leading-relaxed text-muted-foreground">
+                    {deal.description}
+                  </p>
                 </div>
 
                 <Separator />
 
                 <div>
-                  <h3 className="font-semibold mb-3">Deal Information</h3>
+                  <h3 className="mb-3 font-semibold">Deal Information</h3>
                   <dl className="space-y-2">
                     <div className="flex justify-between">
                       <dt className="text-muted-foreground">Source:</dt>
@@ -68,7 +100,9 @@ export default async function DealPage({ params }: { params: Promise<{ id: strin
                     </div>
                     <div className="flex justify-between">
                       <dt className="text-muted-foreground">Posted:</dt>
-                      <dd className="font-medium">{new Date(deal.scrapedAt).toLocaleDateString()}</dd>
+                      <dd className="font-medium">
+                        {new Date(deal.scrapedAt).toLocaleDateString()}
+                      </dd>
                     </div>
                   </dl>
                 </div>
@@ -77,8 +111,12 @@ export default async function DealPage({ params }: { params: Promise<{ id: strin
 
                 <div className="flex gap-3">
                   <Button asChild className="flex-1" size="lg">
-                    <Link href={deal.url} target="_blank" rel="noopener noreferrer">
-                      View Deal on {deal.source}
+                    <Link
+                      href={finalUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      View Deal
                     </Link>
                   </Button>
                 </div>
@@ -95,31 +133,48 @@ export default async function DealPage({ params }: { params: Promise<{ id: strin
             </CardHeader>
             <CardContent className="space-y-4">
               <div>
-                <p className="text-sm text-muted-foreground mb-1">Current Price</p>
-                <p className="text-3xl font-bold text-green-600">${deal.currentPrice.toFixed(2)}</p>
-              </div>
-
-              <Separator />
-
-              <div>
-                <p className="text-sm text-muted-foreground mb-1">Fair Price (AI Predicted)</p>
-                <p className="text-2xl font-semibold line-through text-muted-foreground">${deal.predictedFairPrice.toFixed(2)}</p>
-              </div>
-
-              <Separator />
-
-              <div>
-                <p className="text-sm text-muted-foreground mb-1">You Save</p>
-                <p className="text-3xl font-bold text-green-600">${deal.discount.toFixed(2)}</p>
-                <p className="text-sm text-muted-foreground mt-1">
-                  ({((deal.discount / deal.predictedFairPrice) * 100).toFixed(0)}% off)
+                <p className="mb-1 text-sm text-muted-foreground">
+                  Current Price
+                </p>
+                <p className="text-3xl font-bold text-green-600">
+                  ${deal.currentPrice.toFixed(2)}
                 </p>
               </div>
 
               <Separator />
 
-              <div className="text-center py-3">
-                <p className="text-lg font-semibold">{getVerdict(deal.dealyticsScore)}</p>
+              <div>
+                <p className="mb-1 text-sm text-muted-foreground">
+                  Fair Price (AI Predicted)
+                </p>
+                <p className="text-2xl font-semibold text-muted-foreground line-through">
+                  ${deal.predictedFairPrice.toFixed(2)}
+                </p>
+              </div>
+
+              <Separator />
+
+              <div>
+                <p className="mb-1 text-sm text-muted-foreground">You Save</p>
+                <p className="text-3xl font-bold text-green-600">
+                  ${deal.discount.toFixed(2)}
+                </p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  (
+                  {(
+                    (deal.discount / deal.predictedFairPrice) *
+                    100
+                  ).toFixed(0)}
+                  % off)
+                </p>
+              </div>
+
+              <Separator />
+
+              <div className="py-3 text-center">
+                <p className="text-lg font-semibold">
+                  {getVerdict(deal.dealyticsScore)}
+                </p>
               </div>
             </CardContent>
           </Card>
@@ -129,9 +184,13 @@ export default async function DealPage({ params }: { params: Promise<{ id: strin
               <CardTitle>About the Score</CardTitle>
             </CardHeader>
             <CardContent>
-              <p className="text-sm text-muted-foreground leading-relaxed">
-                Our AI analyzes thousands of products to predict fair prices. Scores above 70 indicate exceptional value. This
-                deal scored <span className="font-bold text-foreground">{deal.dealyticsScore}/100</span>.
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                Our AI analyzes thousands of products to predict fair prices.
+                Scores above 70 indicate exceptional value. This deal scored{' '}
+                <span className="font-bold text-foreground">
+                  {deal.dealyticsScore}/100
+                </span>
+                .
               </p>
             </CardContent>
           </Card>

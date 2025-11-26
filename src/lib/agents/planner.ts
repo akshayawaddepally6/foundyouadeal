@@ -13,7 +13,7 @@ export class PlanningAgent {
     console.log('═════════════════════════════════════════════════════════\n')
 
     try {
-      // 1. Scan deals from RSS feeds
+      // 1. Scan deals from RSS feeds (ScannerAgent already picked the best ones)
       const selectedDeals = await this.scanner.scan()
 
       if (selectedDeals.length === 0) {
@@ -33,8 +33,11 @@ export class PlanningAgent {
       for (let i = 0; i < selectedDeals.length; i++) {
         const deal = selectedDeals[i]
         console.log(`\n[${i + 1}/${selectedDeals.length}] Processing deal...`)
+        console.log(`   🔗 Source URL (DealNews): ${deal.url}`)
+        console.log(`   🛒 Merchant URL (direct): ${deal.merchantUrl ?? 'N/A'}`)
+
         try {
-          // Get price prediction
+          // Get price prediction from PricingAgent
           const prediction = await this.pricing.predictPrice(deal.product_description)
 
           if (prediction.finalPrice === 0) {
@@ -53,14 +56,14 @@ export class PlanningAgent {
             fairPrice: prediction.finalPrice,
           })
 
-          // If score is 0, it's not really a deal – you can choose to skip or still save
+          // If score is 0, it's not really a deal – skip
           if (dealyticsScore === 0) {
             console.warn(`   ⚠️  Skipped (not a real deal, score = 0)`)
             skippedCount++
             continue
           }
 
-          // Extract category from description (simple approach)
+          // Extract category from description (simple keyword approach)
           const category = this.extractCategory(deal.product_description)
 
           console.log(`   💾 Saving to database...`)
@@ -71,8 +74,9 @@ export class PlanningAgent {
           console.log(`      Category: ${category}`)
 
           // 3. Save to database (upsert to avoid duplicates)
+          // We keep DealNews URL as the unique key, and store merchantUrl separately.
           await prisma.deal.upsert({
-            where: { url: deal.url },
+            where: { url: deal.url }, // DealNews URL is the unique identifier
             update: {
               title: deal.product_description.slice(0, 200),
               description: deal.product_description,
@@ -81,11 +85,13 @@ export class PlanningAgent {
               discount,
               dealyticsScore,
               category,
+              merchantUrl: deal.merchantUrl ?? null, // 👈 NEW: update merchant URL too
             },
             create: {
               title: deal.product_description.slice(0, 200),
               description: deal.product_description,
-              url: deal.url,
+              url: deal.url,                         // DealNews page
+              merchantUrl: deal.merchantUrl ?? null, // 👈 NEW: direct store link
               currentPrice: deal.price,
               predictedFairPrice: prediction.finalPrice,
               discount,
@@ -113,7 +119,11 @@ export class PlanningAgent {
       console.log(`   ⚠️  Skipped: ${skippedCount}`)
       console.log(`   ❌ Errors: ${errorCount}`)
       console.log(`   ⏱️  Total time: ${pipelineTime}s`)
-      console.log(`   ⚡ Average: ${(parseFloat(pipelineTime) / selectedDeals.length).toFixed(2)}s per deal`)
+      console.log(
+        `   ⚡ Average: ${(parseFloat(pipelineTime) / selectedDeals.length).toFixed(
+          2
+        )}s per deal`
+      )
       console.log('═════════════════════════════════════════════════════════\n')
 
       return savedCount
@@ -123,7 +133,7 @@ export class PlanningAgent {
     }
   }
 
-  // ⭐ New smarter scoring logic
+  // ⭐ Smarter scoring logic
   private calculateDealScore({
     currentPrice,
     fairPrice,
@@ -190,23 +200,40 @@ export class PlanningAgent {
     if (desc.includes('laptop') || desc.includes('computer') || desc.includes('pc')) {
       return 'Computers'
     }
-    if (desc.includes('phone') || desc.includes('mobile') || desc.includes('iphone') || desc.includes('samsung')) {
+    if (
+      desc.includes('phone') ||
+      desc.includes('mobile') ||
+      desc.includes('iphone') ||
+      desc.includes('samsung')
+    ) {
       return 'Cell Phones'
     }
     if (desc.includes('tv') || desc.includes('monitor') || desc.includes('display')) {
       return 'Electronics'
     }
-    if (desc.includes('headphone') || desc.includes('earbuds') || desc.includes('speaker')) {
+    if (
+      desc.includes('headphone') ||
+      desc.includes('earbuds') ||
+      desc.includes('speaker')
+    ) {
       return 'Audio'
     }
-    if (desc.includes('kitchen') || desc.includes('cookware') || desc.includes('appliance')) {
+    if (
+      desc.includes('kitchen') ||
+      desc.includes('cookware') ||
+      desc.includes('appliance')
+    ) {
       return 'Home & Kitchen'
     }
-    if (desc.includes('gaming') || desc.includes('playstation') || desc.includes('xbox') || desc.includes('nintendo')) {
+    if (
+      desc.includes('gaming') ||
+      desc.includes('playstation') ||
+      desc.includes('xbox') ||
+      desc.includes('nintendo')
+    ) {
       return 'Gaming'
     }
 
     return 'General'
   }
 }
-
