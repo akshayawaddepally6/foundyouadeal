@@ -4,6 +4,8 @@ import { DealCard } from '@/components/deal-card'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ScanDealsButton } from '@/components/scan-deals-button'
+import { NewlyScannedDeals, NewlyScannedDealsSkeleton } from '@/components/newly-scanned-deals'
+import { Separator } from '@/components/ui/separator'
 import Link from 'next/link'
 
 async function DealsFeed({ category }: { category?: string }) {
@@ -57,6 +59,13 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      <Suspense fallback={<NewlyScannedDealsSkeleton />}>
+        <NewlyScannedDeals />
+      </Suspense>
+
+      <Separator className="mb-8" />
+
+      <h2 className="text-2xl font-bold mb-4">Browse All Deals</h2>
       <Tabs defaultValue="all" className="mb-8">
         <TabsList>
           <TabsTrigger value="all">All Deals</TabsTrigger>
