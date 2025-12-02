@@ -27,6 +27,7 @@ export interface DealWithScore {
   title: string
   description: string
   url: string
+  merchantUrl: string | null // direct store link
   currentPrice: number
   predictedFairPrice: number
   discount: number

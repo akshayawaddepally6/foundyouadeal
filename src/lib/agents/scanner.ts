@@ -173,7 +173,7 @@ export class ScannerAgent {
     for (const d of deals) dealByUrl.set(d.url, d)
 
     const prompt = `
-From the deals below, select the 5 with the most detailed descriptions and clear prices.
+From the deals below, select the 5 best with the most detailed descriptions and clear prices.
 
 RULES:
 1. Only include deals with a clear numeric price (e.g., "$49" or "$79.99")
