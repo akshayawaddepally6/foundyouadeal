@@ -19,6 +19,7 @@ export interface SelectedDeal {
 export interface PricePrediction {
   llamaPrice: number
   gptPrice: number
+  perplexityPrice?: number
   finalPrice: number
 }
 

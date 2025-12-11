@@ -6,6 +6,12 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 })
 
+// Separate client for Perplexity Sonar
+const sonarClient = new OpenAI({
+  apiKey: process.env.PERPLEXITY_API_KEY!,
+  baseURL: 'https://api.perplexity.ai',
+})
+
 const ALLOWED_CATEGORIES = [
   'Automotive',
   'Electronics',
@@ -26,10 +32,32 @@ type GPTPriceResult = {
   topDistance: number | null
 }
 
+/* -------------------------
+   Helpers
+   ------------------------- */
+
+// Simple numeric parser: pull the first reasonable number out of a string
+// Returns NaN on failure so we can distinguish "no value" from 0.
 function parsePrice(text: string | null | undefined): number {
-  if (!text) return 0
-  const num = parseFloat(text.replace(/[^0-9.]/g, ''))
-  return Number.isFinite(num) ? num : 0
+  if (!text) {
+    console.warn('parsePrice got empty text from model')
+    return NaN
+  }
+
+  const str = String(text)
+  // Match first integer or decimal like 530 or 530.99
+  const match = str.match(/[0-9]+(\.[0-9]+)?/)
+  if (!match) {
+    console.warn('parsePrice failed to find any number:', { text: str })
+    return NaN
+  }
+
+  const num = parseFloat(match[0])
+  if (!Number.isFinite(num)) {
+    console.warn('parsePrice failed to parse:', { text: str, token: match[0] })
+    return NaN
+  }
+  return num
 }
 
 function median(values: number[]): number {
@@ -42,9 +70,25 @@ function median(values: number[]): number {
   return sorted[mid]
 }
 
-/**
- * Pricing Agent - category-aware RAG + smarter ensemble
- */
+// Reject candidate if it's an extreme outlier vs baseline signals
+function isReasonableSignal(candidate: number, baseline: number[]): boolean {
+  if (!candidate || !Number.isFinite(candidate) || candidate <= 0) return false
+  if (baseline.length === 0) return true // no baseline to compare against, accept
+  const med = median(baseline)
+  if (med === 0) return true
+  // threshold: lower than 20% of median or larger than 5x median → reject
+  if (candidate < med * 0.2 || candidate > med * 5) return false
+  return true
+}
+
+function fmt(n: number): string {
+  return Number.isFinite(n) ? n.toFixed(2) : 'NaN'
+}
+
+/* -------------------------
+   PricingAgent class
+   ------------------------- */
+
 export class PricingAgent {
   /**
    * Use GPT to map a free-text description to one of your 8 categories.
@@ -75,8 +119,6 @@ export class PricingAgent {
       })
 
       const raw = (completion.choices[0].message.content || '').trim()
-
-      // Try to match raw output to one of the allowed categories
       const matched = ALLOWED_CATEGORIES.find((cat) => raw.includes(cat))
 
       if (!matched) {
@@ -117,7 +159,10 @@ export class PricingAgent {
       })
 
       console.log(`   📡 Response status: ${response.status} ${response.statusText}`)
-      console.log(`   📋 Response headers:`, Object.fromEntries(response.headers.entries()))
+      console.log(
+        `   📋 Response headers:`,
+        Object.fromEntries(response.headers.entries()),
+      )
 
       if (!response.ok) {
         const errorText = await response.text()
@@ -163,17 +208,137 @@ export class PricingAgent {
       temperature: 0.3,
     })
 
-    return parsePrice(completion.choices[0].message.content)
+    const parsed = parsePrice(completion.choices[0].message.content)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+
+  /**
+   * Perplexity Sonar pricing.
+   * Uses chat/completions and asks for ONLY a number.
+   * Returns NaN on failure.
+   */
+  async getPerplexityPrice(description: string): Promise<number> {
+    const start = Date.now()
+    console.log('🔎 Perplexity (Sonar) pricing: Starting...')
+
+    try {
+      // feature flag
+      if (process.env.PERPLEXITY_ENABLED === 'false') {
+        console.log('   ℹ️ Perplexity disabled via env')
+        return NaN
+      }
+
+      if (!process.env.PERPLEXITY_API_KEY) {
+        console.warn('   ⚠️  Perplexity API key not set')
+        return NaN
+      }
+
+      const model = process.env.PERPLEXITY_MODEL || 'sonar'
+
+      // ---------- First attempt ----------
+      const completion = await sonarClient.chat.completions.create({
+        model,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a strict price estimator. Always start your answer with a single positive integer or decimal number (the price in USD), then you may optionally add an explanation after that. Do NOT start with words.',
+          },
+          {
+            role: 'user',
+            content: `Estimate the fair market price (in USD) for this product:\n\n${description}`,
+          },
+        ],
+        max_tokens: 32,
+        temperature: 0.2,
+      })
+
+      // Normalize Perplexity content (string or array) into a plain string
+      const msg = completion.choices[0]?.message as any
+      let rawContent = ''
+
+      const content = (msg?.content ?? '') as any
+
+      if (typeof content === 'string') {
+        rawContent = content
+      } else if (Array.isArray(content)) {
+        rawContent = content
+          .map((part: any) => {
+            if (!part) return ''
+            if (typeof part === 'string') return part
+            if (typeof part.text === 'string') return part.text
+            if (part.type === 'text' && part.text?.value) return String(part.text.value)
+            return ''
+          })
+          .join(' ')
+          .trim()
+      }
+
+      console.log('   🔎 Perplexity content (first attempt):', rawContent)
+
+      let parsed = parsePrice(rawContent)
+
+      // ---------- Retry if first attempt had no digits or non-positive ----------
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        console.warn(
+          '   ⚠️  Perplexity first attempt non-numeric or non-positive, retrying with stricter prompt',
+        )
+
+        const retry = await sonarClient.chat.completions.create({
+          model,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'Respond ONLY with a single positive number (the price in USD). Do not include any words, currency symbols, or explanation.',
+            },
+            {
+              role: 'user',
+              content: `Just output the fair price (USD) for this product as a bare number:\n${description}`,
+            },
+          ],
+          max_tokens: 8,
+          temperature: 0,
+        })
+
+        const retryMsg = retry.choices[0]?.message as any
+        let retryContent = ''
+
+        const retryContentRaw = (retryMsg?.content ?? '') as any
+
+        if (typeof retryContentRaw === 'string') {
+          retryContent = retryContentRaw
+        } else if (Array.isArray(retryContentRaw)) {
+          retryContent = retryContentRaw
+            .map((part: any) => {
+              if (!part) return ''
+              if (typeof part === 'string') return part
+              if (typeof part.text === 'string') return part.text
+              if (part.type === 'text' && part.text?.value)
+                return String(part.text.value)
+              return ''
+            })
+            .join(' ')
+            .trim()
+        }
+
+        console.log('   🔎 Perplexity content (retry):', retryContent)
+        parsed = parsePrice(retryContent)
+      }
+
+      const elapsed = ((Date.now() - start) / 1000).toFixed(2)
+      console.log(`   🔎 Perplexity parsed: ${parsed} (${elapsed}s)`)
+
+      return parsed // may be NaN
+    } catch (err) {
+      const elapsed = ((Date.now() - start) / 1000).toFixed(2)
+      console.error(`   🔎 Perplexity failed (${elapsed}s):`, err)
+      return NaN
+    }
   }
 
   /**
    * GPT-4o-mini with category-aware RAG over pgvector.
-   *
-   * NEW RULE:
-   * - We fetch up to 5 closest products.
-   * - We ONLY keep neighbors with distance <= 0.5 as "good".
-   * - GPT RAG context + neighbor avg use ONLY those good neighbors.
-   * - If NO neighbor has distance <= 0.5 → skip RAG and use simple GPT (no context).
    */
   async getGPTPrice(description: string): Promise<GPTPriceResult> {
     const ragStartTime = Date.now()
@@ -270,7 +435,9 @@ export class PricingAgent {
         }
       }
 
-      console.log(`   ✅ Found ${similarProducts.length} raw neighbors (${vectorTime}s)`)
+      console.log(
+        `   ✅ Found ${similarProducts.length} raw neighbors (${vectorTime}s)`,
+      )
       similarProducts.forEach((p, i) => {
         console.log(
           `      RAW ${i + 1}. ${p.title.slice(0, 60)} - $${p.price} (d=${p.distance.toFixed(
@@ -279,7 +446,7 @@ export class PricingAgent {
         )
       })
 
-      // 3. Keep only neighbors with distance <= 0.5
+      // 3. Keep only neighbors with distance <= 0.5 (strict)
       const GOOD_NEIGHBOR_MAX_DISTANCE = 0.5
 
       const goodNeighbors = similarProducts.filter(
@@ -336,7 +503,9 @@ export class PricingAgent {
           : 0
 
       console.log(
-        `   💡 Neighbor avg price (good-only): $${neighborAveragePrice.toFixed(2)}`,
+        `   💡 Neighbor avg price (good-only): $${neighborAveragePrice.toFixed(
+          2,
+        )}`,
       )
 
       // 4. Build context from good neighbors and call GPT
@@ -376,18 +545,21 @@ export class PricingAgent {
         temperature: 0.3,
       })
 
-      const price = parsePrice(completion.choices[0].message.content)
+      const rawPrice = parsePrice(completion.choices[0].message.content)
+      const price = Number.isFinite(rawPrice) ? rawPrice : 0
 
       const gptTime = ((Date.now() - gptStartTime) / 1000).toFixed(2)
       const totalTime = ((Date.now() - ragStartTime) / 1000).toFixed(2)
 
-      console.log(`   ✅ GPT responded: $${price} (${gptTime}s)`)
+      console.log(`   ✅ GPT responded: $${fmt(price)} (${gptTime}s)`)
       console.log(
-        `🤖 GPT+RAG complete: $${price} (total ${totalTime}s, using ${goodNeighbors.length} good neighbors)`,
+        `🤖 GPT+RAG complete: $${fmt(
+          price,
+        )} (total ${totalTime}s, using ${goodNeighbors.length} good neighbors)`,
       )
 
       return {
-        price: price || 0,
+        price,
         neighborAveragePrice:
           prices.length && Number.isFinite(neighborAveragePrice)
             ? neighborAveragePrice
@@ -409,25 +581,47 @@ export class PricingAgent {
   }
 
   /**
-   * Main entry: combine Llama + GPT + (good) neighbor average
+   * Main entry: combine Llama + GPT + (good) neighbor avg + Perplexity Sonar
    */
   async predictPrice(description: string): Promise<PricePrediction> {
     const totalStartTime = Date.now()
     console.log(`💰 PRICING: "${description.slice(0, 60)}..."`)
     console.log(`─────────────────────────────────────────────────────────`)
 
-    const [llamaPrice, gptResult] = await Promise.all([
+    const [llamaPrice, gptResult, rawPerplexityPrice] = await Promise.all([
       this.getLlamaPrice(description),
       this.getGPTPrice(description),
+      this.getPerplexityPrice(description),
     ])
 
     const gptPrice = gptResult.price
     const neighborAvg = gptResult.neighborAveragePrice
 
+    // baseline signals (without Perplexity) to evaluate outlier-ness
+    const baselineSignals: number[] = []
+    if (llamaPrice > 0) baselineSignals.push(llamaPrice)
+    if (gptPrice > 0) baselineSignals.push(gptPrice)
+    if (neighborAvg && neighborAvg > 0) baselineSignals.push(neighborAvg)
+
+    // sanity-check Perplexity against baseline
+    let perplexityPrice = rawPerplexityPrice
+    if (!Number.isFinite(rawPerplexityPrice)) {
+      console.warn('   ⚠️  Perplexity returned NaN / invalid, ignoring')
+      perplexityPrice = 0
+    } else if (!isReasonableSignal(rawPerplexityPrice, baselineSignals)) {
+      console.warn(
+        `   ⚠️  Perplexity price ${rawPerplexityPrice} rejected as outlier vs baseline ${JSON.stringify(
+          baselineSignals,
+        )}`,
+      )
+      perplexityPrice = 0
+    }
+
     console.log(`─────────────────────────────────────────────────────────`)
     console.log(`📊 ENSEMBLE CALCULATION:`)
-    console.log(`   Llama:   $${llamaPrice.toFixed(2)}`)
-    console.log(`   GPT:     $${gptPrice.toFixed(2)}`)
+    console.log(`   Llama:      $${fmt(llamaPrice)}`)
+    console.log(`   GPT:        $${fmt(gptPrice)}`)
+    console.log(`   Perplexity: $${fmt(perplexityPrice)}`)
     if (neighborAvg && neighborAvg > 0) {
       console.log(`   Neighbor avg (good-only): $${neighborAvg.toFixed(2)}`)
     } else {
@@ -438,6 +632,7 @@ export class PricingAgent {
     if (llamaPrice > 0) signals.push(llamaPrice)
     if (gptPrice > 0) signals.push(gptPrice)
     if (neighborAvg && neighborAvg > 0) signals.push(neighborAvg)
+    if (perplexityPrice > 0) signals.push(perplexityPrice)
 
     let finalPrice = 0
     let method = 'Unknown'
@@ -445,11 +640,15 @@ export class PricingAgent {
     if (signals.length >= 2) {
       finalPrice = median(signals)
       method =
-        signals.length === 3
-          ? 'Median of Llama + GPT + neighbor avg'
+        signals.length === 4
+          ? 'Median of Llama + GPT + neighbor avg + Perplexity'
+          : signals.length === 3
+          ? 'Median of three signals'
           : 'Median of available signals'
       console.log(`   ─────────────────────────`)
-      console.log(`   Final (ensemble): $${finalPrice.toFixed(2)} (${method})`)
+      console.log(
+        `   Final (ensemble): $${finalPrice.toFixed(2)} (${method})`,
+      )
     } else if (llamaPrice > 0) {
       finalPrice = llamaPrice
       method = 'Llama only'
@@ -458,19 +657,29 @@ export class PricingAgent {
       finalPrice = gptPrice
       method = 'GPT only'
       console.log(`   ⚠️  Using GPT only: $${finalPrice.toFixed(2)}`)
+    } else if (perplexityPrice > 0) {
+      finalPrice = perplexityPrice
+      method = 'Perplexity only'
+      console.log(`   ⚠️  Using Perplexity only: $${finalPrice.toFixed(2)}`)
     } else {
       finalPrice = 0
-      method = 'Both failed'
-      console.error(`   ❌ Both models failed!`)
+      method = 'All failed'
+      console.error(`   ❌ All models failed!`)
     }
 
     const totalTime = ((Date.now() - totalStartTime) / 1000).toFixed(2)
-    console.log(`💰 PRICING COMPLETE: $${finalPrice.toFixed(2)} (${totalTime}s) [${method}]`)
+    console.log(
+      `💰 PRICING COMPLETE: $${finalPrice.toFixed(
+        2,
+      )} (${totalTime}s) [${method}]`,
+    )
     console.log(`═════════════════════════════════════════════════════════\n`)
 
     return {
       llamaPrice,
       gptPrice,
+      // @ts-ignore add perplexityPrice in your PricePrediction type when you're ready
+      perplexityPrice,
       finalPrice: Math.round(finalPrice * 100) / 100,
     }
   }

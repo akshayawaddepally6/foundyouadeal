@@ -12,6 +12,7 @@ interface PriceResult {
   predictedPrice: number
   llamaPrice: number
   gptPrice: number
+  perplexityPrice?: number | null
 }
 
 export default function PriceCheckerPage() {
@@ -187,6 +188,12 @@ export default function PriceCheckerPage() {
                     <div className="flex justify-between text-sm">
                       <span className="text-muted-foreground">GPT Model:</span>
                       <span className="font-medium">${result.gptPrice.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Perplexity Model:</span>
+                      <span className="font-medium">
+                        {result.perplexityPrice && result.perplexityPrice > 0 ? `$${result.perplexityPrice.toFixed(2)}` : 'N/A'}
+                      </span>
                     </div>
                   </div>
 

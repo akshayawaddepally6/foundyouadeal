@@ -6,7 +6,8 @@ export const maxDuration = 300
 
 const CheckPriceSchema = z.object({
   description: z.string().min(10),
-  currentPrice: z.number().optional(),
+  // Accept numeric strings from the client like "529" and coerce them to numbers
+  currentPrice: z.coerce.number().optional(),
 })
 
 export async function POST(request: Request) {
@@ -38,6 +39,8 @@ export async function POST(request: Request) {
       predictedPrice: prediction.finalPrice,
       llamaPrice: prediction.llamaPrice,
       gptPrice: prediction.gptPrice,
+      // include perplexityPrice if present on prediction (safe access)
+      perplexityPrice: (prediction as any).perplexityPrice ?? null,
       currentPrice,
       discount,
       discountPercent,
