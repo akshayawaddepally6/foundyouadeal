@@ -89,3 +89,6 @@ Runs on a schedule with zero manual work.
 6. Dashboard displays the best deals to the user.
 
 ---
+
+
+**NOTION LINK** : https://www.notion.so/Found-You-A-Deal-2c771539694e8032b803dc7ccaa2b493?source=copy_link
